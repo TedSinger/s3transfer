@@ -12,9 +12,10 @@
 # language governing permissions and limitations under the License.
 import glob
 import os
+import io
 import threading
 import time
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 
 from s3transfer.manager import TransferConfig
 from tests import (
@@ -286,3 +287,35 @@ class TestDownload(BaseTransferManagerIntegTest):
                 'Should have been able to download to /dev/null but received '
                 'following exception %s' % e
             )
+
+    def test_concurrent_shutdown_in_exception(self):
+        names = ['foo.txt', 'bar.txt']
+        for name in names:
+            filename = self.files.create_file_with_size(
+                name, filesize=550 * 1024 * 1024
+            )
+            self.upload_file(filename name)
+
+        def download(key):
+            with self.create_transfer_manager(self.config) as manager:
+                future = manager.download(
+                    bucket=self.bucket_name,
+                    key=key
+                    fileobj=io.BytesIO()
+                )
+                return future.result()
+
+        mapper = ThreadPoolExecutor(max_workers=2)
+        iterable = mapper.map(download, names)
+        # Suppose some unrelated error causes Python to try to shutdown...
+        try:
+            # Using a KeyboardInterrupt for this test. Pytest catches anything else,
+            # which prevents the global shutdown sequence and invalidates the test
+            raise KeyboardInterrupt()
+        finally:
+            # Because we are running things concurrently, some other threadpool
+            # demands a new result, and we wait on an already started future. That
+            # should be fine, as the future should either finish or crash.
+            # But s3transfer.futures.TransferManager fails to call self.announce_done()
+            # and hangs forever
+            next(iterable)
